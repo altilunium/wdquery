@@ -70,6 +70,10 @@
     .item-id { font-size: 0.7rem; background: #e8f0fe; color: #1967d2; padding: 2px 8px; border-radius: 12px; align-self: flex-start; }
     .item-description { font-size: 0.85rem; color: #444; line-height: 1.4; }
 
+    .load-more-container { text-align: center; margin-top: 2rem; margin-bottom: 1rem; display: none; }
+    .btn-load-more { width: auto; padding: 10px 30px; background: #fff; border: 1px solid #dadce0; color: #1a73e8; border-radius: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .btn-load-more:disabled { color: #9aa0a6; cursor: not-allowed; }
+
     /* MOBILE RESPONSIVE */
     @media (max-width: 768px) {
       .app-container { flex-direction: column; }
@@ -108,6 +112,9 @@
           Select properties and values to begin.
         </p>
       </div>
+      <div id="load-more-container" class="load-more-container">
+        <button class="btn btn-load-more" id="load-more-btn">Load More</button>
+      </div>
     </section>
   </main>
 </div>
@@ -121,9 +128,16 @@
   const searchBtn = document.getElementById('search-btn');
   const resultsDiv = document.getElementById('results');
   const statusLabel = document.getElementById('status');
+  const loadMoreContainer = document.getElementById('load-more-container');
+  const loadMoreBtn = document.getElementById('load-more-btn');
 
   let conditions = [];
   let rowIdCounter = 0;
+  
+  // Pagination State
+  let currentCursor = null;
+  let hasNextPage = false;
+  let isFetching = false;
 
   // Toggle Sidebar on Mobile
   mobileToggle.onclick = () => {
@@ -196,26 +210,49 @@
     container.appendChild(div);
   }
 
-  searchBtn.onclick = async () => {
+  // Core Search Logic
+  async function performSearch(isLoadMore = false) {
+    if (isFetching) return;
+    
     const valid = conditions.filter(c => c.propId && c.valId);
     if (valid.length === 0) return;
 
-    // Minimize on Mobile after search
-    if (window.innerWidth <= 768) {
-      sidebar.classList.add('minimized');
-      toggleIcon.innerText = '▲';
+    if (!isLoadMore) {
+      currentCursor = null; // Reset pagination for a fresh search
+      if (window.innerWidth <= 768) {
+        sidebar.classList.add('minimized');
+        toggleIcon.innerText = '▲';
+      }
+      resultsDiv.innerHTML = '<p style="grid-column: 1/-1; text-align:center;">Searching...</p>';
+      loadMoreContainer.style.display = 'none';
+    } else {
+      loadMoreBtn.innerText = 'Loading...';
+      loadMoreBtn.disabled = true;
     }
 
-    statusLabel.innerText = "Searching...";
-    resultsDiv.innerHTML = '<p style="grid-column: 1/-1; text-align:center;">Searching...</p>';
+    isFetching = true;
+    statusLabel.innerText = isLoadMore ? "Loading more..." : "Searching...";
 
     const queryPart = (valid.length === 1) 
       ? `{ property: "${valid[0].propId}", value: "${valid[0].valId}" }`
       : `{ and: [${valid.map(v => `{ property: "${v.propId}", value: "${v.valId}" }`).join(', ')}] }`;
 
-    const gql = `query searchItems { searchItems(
-      query: ${queryPart}
-      first: 50) { edges { node { id label(languageCode: "en") description(languageCode: "en") } } } }`;
+    // Append cursor argument if we are paginating
+    const cursorArg = currentCursor ? `, after: "${currentCursor}"` : '';
+
+    const gql = `query searchItems { 
+      searchItems(query: ${queryPart}, first: 50${cursorArg}) { 
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges { 
+          node { id label(languageCode: "en") description(languageCode: "en") } 
+        } 
+      } 
+    }`;
+
+
 
     try {
       const res = await fetch(`https://www.wikidata.org/w/api.php?action=wbgraphql&format=json&origin=*`, {
@@ -224,25 +261,81 @@
         body: JSON.stringify({ query: gql })
       });
       const data = await res.json();
-      const items = data.data?.searchItems?.edges || [];
       
-      resultsDiv.innerHTML = items.length ? '' : '<p style="grid-column: 1/-1; text-align:center;">No items found.</p>';
+      const searchData = data.data?.searchItems || {};
+      const items = searchData.edges || [];
+      const pageInfo = searchData.pageInfo || {};
+      
+      if (!isLoadMore) resultsDiv.innerHTML = '';
+      if (items.length === 0 && !isLoadMore) {
+        resultsDiv.innerHTML = '<p style="grid-column: 1/-1; text-align:center;">No items found.</p>';
+      }
+
+      // Generate HTML chunk for results
+      let htmlChunk = '';
       items.forEach(edge => {
         const n = edge.node;
-        resultsDiv.innerHTML += `
+        htmlChunk += `
           <a class="item-card" href="https://www.wikidata.org/wiki/${n.id}" target="_blank">
             <span class="item-label">${n.label || n.id}</span>
             <span class="item-id">${n.id}</span>
             <span class="item-description">${n.description || ''}</span>
           </a>`;
       });
-      statusLabel.innerText = `Found ${items.length} items`;
+
+      resultsDiv.insertAdjacentHTML('beforeend', htmlChunk);
+
+      // Update Pagination State
+      currentCursor = pageInfo.endCursor || null;
+      //hasNextPage = pageInfo.hasNextPage || false;
+      if (pageInfo.endCursor === null){
+        hasNextPage = false
+      }
+      else {
+        hasNextPage = true
+      }
+      console.log(pageInfo.endCursor)
+
+
+
+      function countResultsChildren() {
+        const results = document.getElementById("results");
+        if (!results) return 0;
+        return results.children.length;
+      }
+
+
+
+
+
+
+
+      if (hasNextPage) {
+        loadMoreContainer.style.display = 'block';
+      } else {
+        loadMoreContainer.style.display = 'none';
+      }
+
+      statusLabel.innerText = hasNextPage ? "Showing results (more available)" : "Reached end of results";
+      statusLabel.innerText = statusLabel.innerText + " ("+ countResultsChildren() +")"
     } catch (e) {
       statusLabel.innerText = "Error";
+      if (!isLoadMore) resultsDiv.innerHTML = '<p style="grid-column: 1/-1; text-align:center;">An error occurred.</p>';
+    } finally {
+      isFetching = false;
+      if (isLoadMore) {
+        loadMoreBtn.innerText = 'Load More';
+        loadMoreBtn.disabled = false;
+      }
     }
-  };
+  }
 
+  // Event Listeners
+  searchBtn.onclick = () => performSearch(false);
+  loadMoreBtn.onclick = () => performSearch(true);
   addBtn.onclick = addRow;
+  
+  // Initialize first row
   addRow();
 </script>
 </body>
